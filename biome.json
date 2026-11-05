@@ -1,0 +1,35 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.6.4/schema.json",
+
+  "files": {
+    "includes": ["**", "!**/.direnv", "!**/dist", "!**/node_modules"]
+  },
+
+  "formatter": {
+    "indentStyle": "space",
+    "lineWidth": 120
+  },
+
+  "assist": {
+    "actions": {
+      "source": {
+        "organizeImports": {
+          "level": "on",
+          "options": {
+            "groups": [
+              [":NODE:"],
+              ":BLANK_LINE:",
+              [":PACKAGE:", "!@urnerys/**"],
+              ":BLANK_LINE:",
+              [":PACKAGE:", "@urnerys/**"],
+              ":BLANK_LINE:",
+              [":ALIAS:"],
+              ":BLANK_LINE:",
+              [":PATH:"]
+            ]
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,79 @@
+name: Pull Request Verification
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prv-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check-flake:
+    if: github.event.pull_request.draft == false
+    name: Check Flake
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+
+      - run: nix flake check
+
+  integrity:
+    if: github.event.pull_request.draft == false
+    name: Integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    needs:
+      - check-flake
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+
+      - run: nix run .#nix-develop .#workflow
+
+      - run: biome migrate --write
+      - run: git diff --exit-code
+
+  biome:
+    if: github.event.pull_request.draft == false
+    name: Biome
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    needs:
+      - integrity
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+
+      - run: nix run .#nix-develop .#workflow
+
+      - run: biome ci
+
+  prv:
+    if: github.event.pull_request.draft == false
+    name: Pull Request Verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    needs:
+      - integrity
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+
+      - run: nix run .#nix-develop .#workflow
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm run typecheck
+      - run: pnpm run build
