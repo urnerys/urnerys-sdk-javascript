@@ -1,0 +1,36 @@
+{
+  "name": "@urnerys/playwright",
+  "version": "0.0.0",
+  "description": "Playwright reporter that uploads screenshots to Urnerys",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/urnerys/urnerys-sdk-javascript.git",
+    "directory": "pkg/playwright"
+  },
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    "./reporter": {
+      "types": "./dist/reporter.d.ts",
+      "default": "./dist/reporter.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "peerDependencies": {
+    "@playwright/test": ">=1.40.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.1"
+  }
+}
