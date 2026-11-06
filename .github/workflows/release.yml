@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - pkg/playwright/package.json
+
+permissions:
+  contents: read
+
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      contents: write
+      actions: write
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          version=$(jq -r .version pkg/playwright/package.json)
+          previous=$(git show "$BEFORE:pkg/playwright/package.json" 2>/dev/null | jq -r .version || true)
+
+          if [ "$version" = "$previous" ]; then
+            echo "Version is still $version, nothing to release"
+            exit 0
+          fi
+
+          if gh release view "v$version" > /dev/null 2>&1; then
+            echo "Release v$version already exists"
+            exit 0
+          fi
+
+          notes="$RUNNER_TEMP/notes.md"
+          awk -v heading="## $version" '$0 == heading { found = 1; next } /^## / { found = 0 } found' pkg/playwright/CHANGELOG.md > "$notes"
+          if [ ! -s "$notes" ]; then
+            echo "No release notes for $version in pkg/playwright/CHANGELOG.md" >&2
+            exit 1
+          fi
+
+          gh release create "v$version" --target "$GITHUB_SHA" --title "v$version" --notes-file "$notes"
+          gh workflow run publish.yml --ref "v$version"
