@@ -49,4 +49,4 @@ jobs:
       # ---------------------------------------------------------------------
       # Publish
 
-      - run: pnpm --recursive publish --registry https://registry.npmjs.org --access public --no-git-checks
+      - run: pnpm stage publish --recursive --registry https://registry.npmjs.org --access public --no-git-checks
