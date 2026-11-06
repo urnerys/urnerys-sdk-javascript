@@ -90,6 +90,7 @@
               pkgs.nodejs
               pkgs.pnpm
               pkgs.biome
+              pkgs.jq
             ];
           };
         }
