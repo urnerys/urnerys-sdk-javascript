@@ -1,5 +1,11 @@
 # @urnerys/playwright
 
+## 0.1.1
+
+### Patch Changes
+
+- **Publish releases through npm staged publishing** ([#4](https://github.com/urnerys/urnerys-sdk-javascript/pull/4)) -
+
 ## 0.1.0
 
 ### Minor Changes
