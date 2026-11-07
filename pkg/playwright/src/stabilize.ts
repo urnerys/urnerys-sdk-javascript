@@ -1,12 +1,14 @@
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
+
+/**
+ * Which images have to be loaded before the screenshot:
+ *
+ *   - `viewport`: images inside the root element that intersect the viewport
+ *   - `all`: every image inside the root element
+ */
+export type ImageScope = "viewport" | "all";
 
 export interface StabilizeOptions {
-  /**
-   * Whether the screenshot covers the whole page instead of only the viewport. Decides which images have to be
-   * loaded. Defaults to `false`.
-   */
-  fullPage?: boolean;
-
   /**
    * How long to wait for images to load, in milliseconds. Defaults to 5 seconds.
    */
@@ -14,14 +16,19 @@ export interface StabilizeOptions {
 }
 
 /*
- * Returns the `src` of every visible image that isn't ready yet. Considers only images that intersect the viewport,
- * unless `fullPage` is set. Runs in the browser, so it must not reference anything outside its own body.
+ * Returns the `src` of every visible image inside `root` (including `root` itself) that isn't ready yet. Runs in the
+ * browser, so it must not reference anything outside its own body.
  */
-function pendingImages(fullPage: boolean): string[] {
+function pendingImages(root: Element, scope: ImageScope): string[] {
   const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
   const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
 
-  return Array.from(document.querySelectorAll("img"))
+  const images = Array.from(root.querySelectorAll("img"));
+  if (root instanceof HTMLImageElement) {
+    images.push(root);
+  }
+
+  return images
     .filter((img) => {
       const rect = img.getBoundingClientRect();
 
@@ -32,7 +39,11 @@ function pendingImages(fullPage: boolean): string[] {
         return false;
       }
 
-      return fullPage || (rect.bottom > 0 && rect.right > 0 && rect.top < viewportHeight && rect.left < viewportWidth);
+      if (scope === "all") {
+        return true;
+      }
+
+      return rect.bottom > 0 && rect.right > 0 && rect.top < viewportHeight && rect.left < viewportWidth;
     })
     .filter(
       /*
@@ -44,34 +55,26 @@ function pendingImages(fullPage: boolean): string[] {
     .map((img) => img.currentSrc || img.src);
 }
 
-function isTimeoutError(error: unknown): boolean {
-  /*
-   * Checks the name rather than `instanceof errors.TimeoutError`, which fails when there is more than one copy of
-   * Playwright installed.
-   */
-  return error instanceof Error && error.name === "TimeoutError";
-}
-
 /**
- * Waits until every visible image has loaded. Fails with the list of images that didn't load in time, which also
- * catches broken images.
+ * Waits until every visible image inside the root element has loaded. Fails with the list of images that didn't load
+ * in time, which also catches broken images.
  */
-async function waitForImages(page: Page, options: StabilizeOptions = {}): Promise<void> {
-  const { fullPage = false, timeout = 5_000 } = options;
+async function waitForImages(root: Locator, scope: ImageScope, options: StabilizeOptions): Promise<void> {
+  const { timeout = 5_000 } = options;
 
-  const expression = `(${pendingImages})(${JSON.stringify(fullPage)}).length === 0`;
+  const deadline = Date.now() + timeout;
 
-  try {
-    await page.waitForFunction(expression, undefined, { timeout });
-  } catch (error) {
-    if (!isTimeoutError(error)) {
-      throw error;
+  for (;;) {
+    const pending = await root.evaluate(pendingImages, scope, { timeout });
+    if (pending.length === 0) {
+      return;
     }
 
-    const pending = await page.evaluate(pendingImages, fullPage);
-    throw new Error(`[urnerys] Images did not load:\n${pending.map((src) => `  ${src}`).join("\n")}`, {
-      cause: error,
-    });
+    if (Date.now() >= deadline) {
+      throw new Error(`[urnerys] Images did not load:\n${pending.map((src) => `  ${src}`).join("\n")}`);
+    }
+
+    await root.page().waitForTimeout(100);
   }
 }
 
@@ -84,21 +87,14 @@ async function waitForFonts(page: Page): Promise<void> {
   });
 }
 
-/*
- * The steps run in order before every screenshot. Each one waits for one kind of page content to settle.
- */
-const steps: ((page: Page, options: StabilizeOptions) => Promise<void>)[] = [
-  (page) => page.waitForTimeout(50),
-  (page) => page.waitForLoadState("networkidle"),
-  (page) => waitForFonts(page),
-  (page, options) => waitForImages(page, options),
-];
-
 /**
- * Waits until the page is ready for a screenshot.
+ * Waits until the page is ready for a screenshot of `root`. Images are only considered inside `root`.
  */
-export async function stabilize(page: Page, options: StabilizeOptions = {}): Promise<void> {
-  for (const step of steps) {
-    await step(page, options);
-  }
+export async function stabilize(root: Locator, scope: ImageScope, options: StabilizeOptions = {}): Promise<void> {
+  const page = root.page();
+
+  await page.waitForTimeout(50);
+  await page.waitForLoadState("networkidle");
+  await waitForFonts(page);
+  await waitForImages(root, scope, options);
 }

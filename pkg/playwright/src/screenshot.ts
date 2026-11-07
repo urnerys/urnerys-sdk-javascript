@@ -1,4 +1,4 @@
-import { type Page, type TestInfo, test } from "@playwright/test";
+import { type Locator, type Page, type TestInfo, test } from "@playwright/test";
 
 import {
   METADATA_ATTACHMENT_NAME,
@@ -10,19 +10,41 @@ import { type StabilizeOptions, stabilize } from "./stabilize.js";
 
 type PageScreenshotOptions = NonNullable<Parameters<Page["screenshot"]>[0]>;
 
-export interface UrnerysScreenshotOptions
-  extends StabilizeOptions,
-    Omit<PageScreenshotOptions, "path" | "type" | "quality" | "timeout"> {
+type LocatorScreenshotOptions = NonNullable<Parameters<Locator["screenshot"]>[0]>;
+
+/*
+ * Options that Playwright doesn't get to decide: the image is always a PNG attached to the test, and `timeout` is
+ * the image timeout of `stabilize`.
+ */
+type ControlledScreenshotOptions = "path" | "type" | "quality" | "timeout";
+
+/**
+ * Options shared by page and element screenshots.
+ */
+export interface UrnerysScreenshotOptions extends StabilizeOptions {
   /**
    * Collection the snapshot belongs to.
    */
   collection: string;
 
   /**
+   * Title of the snapshot within the collection.
+   */
+  title: string;
+
+  /**
    * Formula the snapshot was rendered with. Defaults to the name of the Playwright project.
    */
   formula?: string;
 }
+
+export interface UrnerysPageScreenshotOptions
+  extends UrnerysScreenshotOptions,
+    Omit<PageScreenshotOptions, ControlledScreenshotOptions> {}
+
+export interface UrnerysElementScreenshotOptions
+  extends UrnerysScreenshotOptions,
+    Omit<LocatorScreenshotOptions, ControlledScreenshotOptions> {}
 
 /*
  * Image attachment names already used by each test attempt. The metadata refers to the image by name, so the name
@@ -60,12 +82,15 @@ function realizationAttributes(page: Page): RealizationAttributes {
   };
 }
 
-/**
- * Waits for the page to be ready, takes a screenshot, and attaches it to the current test so that the Urnerys
- * reporter uploads it.
+/*
+ * Takes a screenshot with `capture` and attaches it, together with its metadata, to the current test.
  */
-export async function urnerysScreenshot(page: Page, title: string, options: UrnerysScreenshotOptions): Promise<void> {
-  const { collection, formula: formulaOption, fullPage, timeout, ...screenshotOptions } = options;
+async function attachScreenshot(
+  page: Page,
+  options: UrnerysScreenshotOptions,
+  capture: () => Promise<Buffer>,
+): Promise<void> {
+  const { collection, title, formula: formulaOption } = options;
 
   const testInfo = test.info();
 
@@ -77,9 +102,7 @@ export async function urnerysScreenshot(page: Page, title: string, options: Urne
   const image = `${collection}/${title} (${formula}).png`;
   claimImageName(testInfo, image);
 
-  await stabilize(page, { fullPage, timeout });
-
-  const body = await page.screenshot({ ...screenshotOptions, fullPage, type: "png" });
+  const body = await capture();
 
   const metadata: ScreenshotMetadata = {
     image,
@@ -93,5 +116,38 @@ export async function urnerysScreenshot(page: Page, title: string, options: Urne
   await testInfo.attach(METADATA_ATTACHMENT_NAME, {
     body: JSON.stringify(metadata),
     contentType: METADATA_CONTENT_TYPE,
+  });
+}
+
+/**
+ * Waits for the page to be ready, takes a screenshot of it, and attaches it to the current test so that the Urnerys
+ * reporter uploads it.
+ */
+export async function urnerysPageScreenshot(page: Page, options: UrnerysPageScreenshotOptions): Promise<void> {
+  const { collection, title, formula, timeout, ...screenshotOptions } = options;
+
+  await attachScreenshot(page, options, async () => {
+    await stabilize(page.locator(":root"), screenshotOptions.fullPage ? "all" : "viewport", { timeout });
+    return page.screenshot({ ...screenshotOptions, type: "png" });
+  });
+}
+
+/**
+ * Waits for the element to be ready, takes a screenshot of it, and attaches it to the current test so that the
+ * Urnerys reporter uploads it. Only images inside the element have to be loaded.
+ */
+export async function urnerysElementScreenshot(
+  locator: Locator,
+  options: UrnerysElementScreenshotOptions,
+): Promise<void> {
+  const { collection, title, formula, timeout, ...screenshotOptions } = options;
+
+  await attachScreenshot(locator.page(), options, async () => {
+    /*
+     * Scrolls first, so that lazy images inside the element start loading before `stabilize` waits for them.
+     */
+    await locator.scrollIntoViewIfNeeded();
+    await stabilize(locator, "all", { timeout });
+    return locator.screenshot({ ...screenshotOptions, type: "png" });
   });
 }
