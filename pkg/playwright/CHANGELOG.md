@@ -1,5 +1,11 @@
 # @urnerys/playwright
 
+## 0.1.2
+
+### Patch Changes
+
+- **Add the `urnerysScreenshot` helper** ([#6](https://github.com/urnerys/urnerys-sdk-javascript/pull/6)) - Take screenshots in Playwright tests with `urnerysScreenshot` from `@urnerys/playwright`. It waits for fonts and images to load, and attaches the screenshot together with its metadata for the reporter. The formula defaults to the name of the Playwright project. The reporter now uploads each screenshot once, from the last attempt of a test, instead of once per retry.
+
 ## 0.1.1
 
 ### Patch Changes
