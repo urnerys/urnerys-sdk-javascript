@@ -1,6 +1,6 @@
 {
   "name": "@urnerys/playwright",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Playwright reporter that uploads screenshots to Urnerys",
   "type": "module",
   "repository": {
