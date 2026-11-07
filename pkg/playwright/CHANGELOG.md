@@ -1,5 +1,11 @@
 # @urnerys/playwright
 
+## 0.2.0
+
+### Minor Changes
+
+- **Add element screenshots and rename `urnerysScreenshot` to `urnerysPageScreenshot`** ([#8](https://github.com/urnerys/urnerys-sdk-javascript/pull/8)) - Take a screenshot of a single element with `urnerysElementScreenshot`, which takes a Playwright `Locator`. It scrolls the element into view, waits for fonts and for the images inside the element to load, and attaches the screenshot like a page screenshot.
+
 ## 0.1.2
 
 ### Patch Changes
