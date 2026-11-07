@@ -1,5 +1,5 @@
 ---
-"@urnerys/playwright": minor
+"@urnerys/playwright": patch
 ---
 
 Add the `urnerysScreenshot` helper
