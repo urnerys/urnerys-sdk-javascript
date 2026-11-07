@@ -143,7 +143,8 @@ class UrnerysReporter implements Reporter {
       const metadata = JSON.parse(attachment.body.toString()) as ScreenshotMetadata;
 
       /*
-       * `urnerysScreenshot` attaches the image before its metadata, so it is always there.
+       * `urnerysPageScreenshot` and `urnerysElementScreenshot` attach the image before its metadata, so it is always
+       * there.
        */
       const image = result.attachments.find((a) => a.name === metadata.image && a.contentType === "image/png");
       if (!image?.body) {
