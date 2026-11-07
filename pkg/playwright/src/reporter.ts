@@ -4,12 +4,17 @@ import os from "node:os";
 import type { FullConfig, FullResult, Reporter, TestCase, TestResult } from "@playwright/test/reporter";
 
 import { fetchGithubOidcToken, githubBuildId, githubCommit } from "./github.js";
+import { METADATA_CONTENT_TYPE, type RealizationAttributes, type ScreenshotMetadata } from "./protocol.js";
 
 export interface UrnerysReporterOptions {
-  /** Name of the Urnerys project the build belongs to. */
+  /**
+   * Name of the Urnerys project the build belongs to.
+   */
   project: string;
 
-  /** Hostname of the Urnerys instance, without scheme. Defaults to `URNERYS_HOST`, then `app.urnerys.dev`. */
+  /**
+   * Hostname of the Urnerys instance, without scheme. Defaults to `URNERYS_HOST`, then `app.urnerys.dev`.
+   */
   host?: string;
 
   /**
@@ -18,13 +23,36 @@ export interface UrnerysReporterOptions {
    */
   mode?: "check" | "promote";
 
-  /** Baseline to check against or promote to. Defaults to `production`. */
+  /**
+   * Baseline to check against or promote to. Defaults to `production`.
+   */
   baseline?: string;
 }
 
 interface Session {
   token: string;
   build: string;
+}
+
+interface Screenshot extends ScreenshotMetadata {
+  body: Buffer;
+}
+
+function screenshotKey({ collection, snapshot, formula }: Screenshot): string {
+  return JSON.stringify([collection, snapshot, formula]);
+}
+
+/*
+ * Whether Playwright is done with the test after this attempt. A test is retried when it didn't end with the
+ * expected status and has retries left. Playwright doesn't retry skipped or interrupted tests.
+ */
+function isFinalAttempt(test: TestCase, result: TestResult): boolean {
+  return (
+    result.status === test.expectedStatus ||
+    result.status === "skipped" ||
+    result.status === "interrupted" ||
+    result.retry >= test.retries
+  );
 }
 
 function osType(): string {
@@ -80,6 +108,14 @@ class UrnerysReporter implements Reporter {
 
   private reportedRealizations = new Set<string>();
 
+  /*
+   * Screenshots of tests that may still be retried, by test id. Each attempt replaces the screenshots of earlier
+   * attempts, and they are uploaded once the test is done.
+   */
+  private pendingScreenshots = new Map<string, Map<string, Screenshot>>();
+
+  private uploadedScreenshots = new Set<string>();
+
   private uploads: Promise<void>[] = [];
 
   constructor(private options: UrnerysReporterOptions) {
@@ -96,41 +132,43 @@ class UrnerysReporter implements Reporter {
     });
   }
 
-  onTestEnd(_test: TestCase, result: TestResult): void {
+  onTestEnd(test: TestCase, result: TestResult): void {
+    const screenshots = new Map<string, Screenshot>();
+
     for (const attachment of result.attachments) {
-      if (attachment.name.startsWith("urnerys-realization|") && attachment.body) {
-        const formula = attachment.name.slice("urnerys-realization|".length);
-
-        if (!this.reportedRealizations.has(formula)) {
-          this.reportedRealizations.add(formula);
-
-          const attributes = {
-            ...(JSON.parse(attachment.body.toString()) as Record<string, string | number>),
-            "dev.urnerys.tool.name": "playwright",
-            "dev.urnerys.tool.version": this.version,
-            "dev.urnerys.os.type": osType(),
-            "dev.urnerys.os.version": os.release(),
-            "dev.urnerys.host.arch": os.arch(),
-          };
-
-          this.uploads.push(
-            this.session.then((session) => session && this.reportRealization(session, formula, attributes)),
-          );
-        }
+      if (attachment.contentType !== METADATA_CONTENT_TYPE || !attachment.body) {
+        continue;
       }
 
-      if (!attachment.name.startsWith("urnerys|") || !attachment.body) continue;
+      const metadata = JSON.parse(attachment.body.toString()) as ScreenshotMetadata;
 
-      const [, collection, snapshot, formula] = attachment.name.split("|");
-      const body = attachment.body;
+      /*
+       * `urnerysScreenshot` attaches the image before its metadata, so it is always there.
+       */
+      const image = result.attachments.find((a) => a.name === metadata.image && a.contentType === "image/png");
+      if (!image?.body) {
+        continue;
+      }
 
-      this.uploads.push(
-        this.session.then((session) => session && this.uploadOne(session, collection, snapshot, formula, body)),
-      );
+      const screenshot = { ...metadata, body: image.body };
+      screenshots.set(screenshotKey(screenshot), screenshot);
+    }
+
+    this.pendingScreenshots.set(test.id, screenshots);
+
+    if (isFinalAttempt(test, result)) {
+      this.uploadScreenshots(test.id);
     }
   }
 
   async onEnd(_result: FullResult): Promise<void> {
+    /*
+     * A run can end before a test reaches its final attempt, e.g. when it hits `maxFailures`.
+     */
+    for (const testId of [...this.pendingScreenshots.keys()]) {
+      this.uploadScreenshots(testId);
+    }
+
     await Promise.all(this.uploads);
 
     const session = await this.session;
@@ -172,6 +210,52 @@ class UrnerysReporter implements Reporter {
   }
 
   /*
+   * Reports the realization of a formula the first time a screenshot with that formula is uploaded.
+   */
+  private addRealization({ formula, realization }: Screenshot): void {
+    if (this.reportedRealizations.has(formula)) {
+      return;
+    }
+    this.reportedRealizations.add(formula);
+
+    const attributes: RealizationAttributes = {
+      ...realization,
+      "dev.urnerys.tool.name": "playwright",
+      "dev.urnerys.tool.version": this.version,
+      "dev.urnerys.os.type": osType(),
+      "dev.urnerys.os.version": os.release(),
+      "dev.urnerys.host.arch": os.arch(),
+    };
+
+    this.uploads.push(this.session.then((session) => session && this.uploadRealization(session, formula, attributes)));
+  }
+
+  /*
+   * Uploads the screenshots from the last attempt of a test. A screenshot that was already uploaded, e.g. by another
+   * test with the same collection, title, and formula, is skipped.
+   */
+  private uploadScreenshots(testId: string): void {
+    const screenshots = this.pendingScreenshots.get(testId);
+    if (!screenshots) {
+      return;
+    }
+
+    this.pendingScreenshots.delete(testId);
+
+    for (const [key, screenshot] of screenshots) {
+      if (this.uploadedScreenshots.has(key)) {
+        const { collection, snapshot, formula } = screenshot;
+        console.warn(`[urnerys] Skipping duplicate screenshot ${collection}/${snapshot}/${formula}`);
+        continue;
+      }
+
+      this.uploadedScreenshots.add(key);
+      this.addRealization(screenshot);
+      this.uploads.push(this.session.then((session) => session && this.uploadScreenshot(session, screenshot)));
+    }
+  }
+
+  /*
    * A build id from `URNERYS_BUILD_ID` means the build was created elsewhere, so it is not created again.
    */
   private async setup(): Promise<Session> {
@@ -196,13 +280,7 @@ class UrnerysReporter implements Reporter {
     return exchangeToken(this.host, oidcToken);
   }
 
-  private async uploadOne(
-    session: Session,
-    collection: string,
-    snapshot: string,
-    formula: string,
-    body: Buffer,
-  ): Promise<void> {
+  private async uploadScreenshot(session: Session, { collection, snapshot, formula, body }: Screenshot): Promise<void> {
     const formData = new FormData();
     formData.set("collection", collection);
     formData.set("snapshot", snapshot);
@@ -226,11 +304,7 @@ class UrnerysReporter implements Reporter {
     }
   }
 
-  private async reportRealization(
-    session: Session,
-    formula: string,
-    attributes: Record<string, string | number | undefined>,
-  ): Promise<void> {
+  private async uploadRealization(session: Session, formula: string, attributes: RealizationAttributes): Promise<void> {
     try {
       const response = await fetch(
         `https://${this.host}/api/v1/projects/${this.options.project}/builds/${session.build}/realizations/${encodeURIComponent(formula)}`,
