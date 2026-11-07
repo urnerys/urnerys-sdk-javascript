@@ -7,7 +7,9 @@ export interface StabilizeOptions {
    */
   fullPage?: boolean;
 
-  /** How long to wait for images to load, in milliseconds. Defaults to 5 seconds. */
+  /**
+   * How long to wait for images to load, in milliseconds. Defaults to 5 seconds.
+   */
   timeout?: number;
 }
 
@@ -23,22 +25,30 @@ function pendingImages(fullPage: boolean): string[] {
     .filter((img) => {
       const rect = img.getBoundingClientRect();
 
-      // Hidden images (e.g. `display: none`) have an empty rect and never show up in a screenshot.
-      if (rect.width === 0 || rect.height === 0) return false;
+      /*
+       * Hidden images (e.g. `display: none`) have an empty rect and never show up in a screenshot.
+       */
+      if (rect.width === 0 || rect.height === 0) {
+        return false;
+      }
 
       return fullPage || (rect.bottom > 0 && rect.right > 0 && rect.top < viewportHeight && rect.left < viewportWidth);
     })
     .filter(
-      // https://developer.mozilla.org/en-US/docs/Web/API/HTMLImageElement/complete
-      // https://developer.mozilla.org/en-US/docs/Web/API/HTMLImageElement/naturalWidth
+      /*
+       * https://developer.mozilla.org/en-US/docs/Web/API/HTMLImageElement/complete
+       * https://developer.mozilla.org/en-US/docs/Web/API/HTMLImageElement/naturalWidth
+       */
       (img) => !img.complete || img.naturalWidth === 0,
     )
     .map((img) => img.currentSrc || img.src);
 }
 
 function isTimeoutError(error: unknown): boolean {
-  // Checks the name rather than `instanceof errors.TimeoutError`, which fails when there is more than one copy of
-  // Playwright installed.
+  /*
+   * Checks the name rather than `instanceof errors.TimeoutError`, which fails when there is more than one copy of
+   * Playwright installed.
+   */
   return error instanceof Error && error.name === "TimeoutError";
 }
 
@@ -54,7 +64,9 @@ async function waitForImages(page: Page, options: StabilizeOptions = {}): Promis
   try {
     await page.waitForFunction(expression, undefined, { timeout });
   } catch (error) {
-    if (!isTimeoutError(error)) throw error;
+    if (!isTimeoutError(error)) {
+      throw error;
+    }
 
     const pending = await page.evaluate(pendingImages, fullPage);
     throw new Error(`[urnerys] Images did not load:\n${pending.map((src) => `  ${src}`).join("\n")}`, {

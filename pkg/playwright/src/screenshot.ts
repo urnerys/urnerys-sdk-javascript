@@ -13,10 +13,14 @@ type PageScreenshotOptions = NonNullable<Parameters<Page["screenshot"]>[0]>;
 export interface UrnerysScreenshotOptions
   extends StabilizeOptions,
     Omit<PageScreenshotOptions, "path" | "type" | "quality" | "timeout"> {
-  /** Collection the snapshot belongs to. */
+  /**
+   * Collection the snapshot belongs to.
+   */
   collection: string;
 
-  /** Formula the snapshot was rendered with. Defaults to the name of the Playwright project. */
+  /**
+   * Formula the snapshot was rendered with. Defaults to the name of the Playwright project.
+   */
   formula?: string;
 }
 

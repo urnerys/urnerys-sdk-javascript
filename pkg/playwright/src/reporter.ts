@@ -7,10 +7,14 @@ import { fetchGithubOidcToken, githubBuildId, githubCommit } from "./github.js";
 import { METADATA_CONTENT_TYPE, type RealizationAttributes, type ScreenshotMetadata } from "./protocol.js";
 
 export interface UrnerysReporterOptions {
-  /** Name of the Urnerys project the build belongs to. */
+  /**
+   * Name of the Urnerys project the build belongs to.
+   */
   project: string;
 
-  /** Hostname of the Urnerys instance, without scheme. Defaults to `URNERYS_HOST`, then `app.urnerys.dev`. */
+  /**
+   * Hostname of the Urnerys instance, without scheme. Defaults to `URNERYS_HOST`, then `app.urnerys.dev`.
+   */
   host?: string;
 
   /**
@@ -19,7 +23,9 @@ export interface UrnerysReporterOptions {
    */
   mode?: "check" | "promote";
 
-  /** Baseline to check against or promote to. Defaults to `production`. */
+  /**
+   * Baseline to check against or promote to. Defaults to `production`.
+   */
   baseline?: string;
 }
 
@@ -130,13 +136,19 @@ class UrnerysReporter implements Reporter {
     const screenshots = new Map<string, Screenshot>();
 
     for (const attachment of result.attachments) {
-      if (attachment.contentType !== METADATA_CONTENT_TYPE || !attachment.body) continue;
+      if (attachment.contentType !== METADATA_CONTENT_TYPE || !attachment.body) {
+        continue;
+      }
 
       const metadata = JSON.parse(attachment.body.toString()) as ScreenshotMetadata;
 
-      // `urnerysScreenshot` attaches the image before its metadata, so it is always there.
+      /*
+       * `urnerysScreenshot` attaches the image before its metadata, so it is always there.
+       */
       const image = result.attachments.find((a) => a.name === metadata.image && a.contentType === "image/png");
-      if (!image?.body) continue;
+      if (!image?.body) {
+        continue;
+      }
 
       const screenshot = { ...metadata, body: image.body };
       screenshots.set(screenshotKey(screenshot), screenshot);
@@ -150,7 +162,9 @@ class UrnerysReporter implements Reporter {
   }
 
   async onEnd(_result: FullResult): Promise<void> {
-    // A run can end before a test reaches its final attempt, e.g. when it hits `maxFailures`.
+    /*
+     * A run can end before a test reaches its final attempt, e.g. when it hits `maxFailures`.
+     */
     for (const testId of [...this.pendingScreenshots.keys()]) {
       this.uploadScreenshots(testId);
     }
@@ -199,7 +213,9 @@ class UrnerysReporter implements Reporter {
    * Reports the realization of a formula the first time a screenshot with that formula is uploaded.
    */
   private addRealization({ formula, realization }: Screenshot): void {
-    if (this.reportedRealizations.has(formula)) return;
+    if (this.reportedRealizations.has(formula)) {
+      return;
+    }
     this.reportedRealizations.add(formula);
 
     const attributes: RealizationAttributes = {
@@ -220,7 +236,9 @@ class UrnerysReporter implements Reporter {
    */
   private uploadScreenshots(testId: string): void {
     const screenshots = this.pendingScreenshots.get(testId);
-    if (!screenshots) return;
+    if (!screenshots) {
+      return;
+    }
 
     this.pendingScreenshots.delete(testId);
 
