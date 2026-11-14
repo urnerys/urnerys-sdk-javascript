@@ -33,11 +33,13 @@ export interface UrnerysReporterOptions {
   baseline?: string;
 
   /**
-   * Whether to upload the report of the Playwright HTML reporter to the build once the run is done. Defaults to `true`.
-   * The upload is skipped with a warning if the HTML reporter is not configured.
+   * Upload of the report of the Playwright HTML reporter to the build once the run is done. Enabled by default, `false`
+   * turns it off. The upload is skipped with a warning if the HTML reporter is not configured.
    */
-  report?: boolean;
+  report?: false | UrnerysReportOptions;
+}
 
+export interface UrnerysReportOptions {
   /**
    * Name of the report within the build. Defaults to `playwright-report`. Runs that upload to the same build need
    * different names, since a report replaces an earlier one with the same name.
@@ -290,7 +292,8 @@ class UrnerysReporter implements Reporter {
    * The HTML reporter writes its files in `onEnd`, and `onExit` runs once every reporter's `onEnd` has finished.
    */
   async onExit(): Promise<void> {
-    if (this.options.report === false) {
+    const { report = {} } = this.options;
+    if (report === false) {
       return;
     }
 
@@ -316,7 +319,7 @@ class UrnerysReporter implements Reporter {
         project: this.options.project,
         build: session.build,
         token: await session.token(),
-        name: this.options.name ?? "playwright-report",
+        name: report.name ?? "playwright-report",
         kind: "playwright-report",
         directory: folder,
       });
