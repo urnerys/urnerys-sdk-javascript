@@ -1,5 +1,11 @@
 # @urnerys/playwright
 
+## 0.3.1
+
+### Patch Changes
+
+- **Send `Content-Length` when uploading the report** ([#15](https://github.com/urnerys/urnerys-sdk-javascript/pull/15)) - The server can now reject an oversized upload right away, and reverse proxies no longer receive a body of unknown length.
+
 ## 0.3.0
 
 ### Minor Changes
