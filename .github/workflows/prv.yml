@@ -42,23 +42,6 @@ jobs:
       - run: biome migrate --write
       - run: git diff --exit-code
 
-  biome:
-    if: github.event.pull_request.draft == false
-    name: Biome
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-
-    needs:
-      - integrity
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
-
-      - run: nix run .#nix-develop .#workflow
-
-      - run: biome ci
-
   prv:
     if: github.event.pull_request.draft == false
     name: Pull Request Verification
@@ -75,5 +58,7 @@ jobs:
       - run: nix run .#nix-develop .#workflow
       - run: pnpm install --frozen-lockfile
 
-      - run: pnpm run typecheck
-      - run: pnpm run build
+      - parallel:
+          - run: biome ci
+          - run: pnpm run typecheck
+          - run: pnpm run build
