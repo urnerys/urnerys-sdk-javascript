@@ -1,11 +1,11 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import type { FullConfig, FullResult, Reporter, TestCase, TestResult } from "@playwright/test/reporter";
 
-import { uploadArtifact } from "./artifact.js";
+import { ArtifactsNotEnabledError, linkArtifactImages, uploadArtifact, uploadArtifactFile } from "./artifact.js";
 import { fetchGithubOidcToken, githubBuildId, githubCommit } from "./github.js";
 import { METADATA_CONTENT_TYPE, type RealizationAttributes, type ScreenshotMetadata } from "./protocol.js";
 import { htmlReportFolder } from "./report.js";
@@ -37,6 +37,12 @@ export interface UrnerysReporterOptions {
    * turns it off. The upload is skipped with a warning if the HTML reporter is not configured.
    */
   report?: false | UrnerysReportOptions;
+
+  /**
+   * Upload of the trace of each test attempt that produced images, linked to those images. Enabled by default, `false`
+   * turns it off. Only attempts that Playwright records a trace for have one, see the `trace` option of Playwright.
+   */
+  traces?: false | UrnerysTraceOptions;
 }
 
 export interface UrnerysReportOptions {
@@ -45,6 +51,15 @@ export interface UrnerysReportOptions {
    * different names, since a report replaces an earlier one with the same name.
    */
   name?: string;
+}
+
+export interface UrnerysTraceOptions {
+  /**
+   * Start of the name of each trace within the build, followed by 32 hexadecimal characters that identify the test
+   * attempt. Defaults to `trace-`. Runs that upload to the same build need different prefixes, since a trace replaces
+   * an earlier one with the same name.
+   */
+  prefix?: string;
 }
 
 /*
@@ -79,6 +94,27 @@ interface Screenshot extends ScreenshotMetadata {
 
 function screenshotKey({ collection, snapshot, formula }: Screenshot): string {
   return JSON.stringify([collection, snapshot, formula]);
+}
+
+interface Trace {
+  /**
+   * Zip archive written by Playwright.
+   */
+  path: string;
+
+  retry: number;
+  status: TestResult["status"];
+  repeatEachIndex: number;
+}
+
+/*
+ * Stable across runs, so that uploading the same attempt again replaces its trace instead of adding another one.
+ */
+function traceKey(testId: string, { retry, repeatEachIndex }: Trace): string {
+  return createHash("sha256")
+    .update(JSON.stringify([testId, retry, repeatEachIndex]))
+    .digest("hex")
+    .slice(0, 32);
 }
 
 /*
@@ -184,7 +220,24 @@ class UrnerysReporter implements Reporter {
    */
   private pendingScreenshots = new Map<string, Map<string, Screenshot>>();
 
+  /*
+   * Traces of every attempt of tests that may still be retried, by test id. Playwright keeps the output of all attempts
+   * until the next run, so the files are still there once the test is done.
+   */
+  private pendingTraces = new Map<string, Trace[]>();
+
   private uploadedScreenshots = new Set<string>();
+
+  /*
+   * Names of all images uploaded in the run, for linking the report.
+   */
+  private imageNames: string[] = [];
+
+  /*
+   * `undefined` when trace uploads are off, either by the options or because the instance answered that artifacts
+   * are not enabled. In the latter case, the warning is only logged once.
+   */
+  private tracePrefix: string | undefined;
 
   private uploads: Promise<void>[] = [];
 
@@ -196,6 +249,7 @@ class UrnerysReporter implements Reporter {
   constructor(private options: UrnerysReporterOptions & PlaywrightReporterOptions) {
     this.host = options.host ?? process.env.URNERYS_HOST ?? "app.urnerys.dev";
     this.baseline = options.baseline ?? "production";
+    this.tracePrefix = options.traces === false ? undefined : (options.traces?.prefix ?? "trace-");
   }
 
   onBegin(config: FullConfig): void {
@@ -234,6 +288,18 @@ class UrnerysReporter implements Reporter {
     }
 
     this.pendingScreenshots.set(test.id, screenshots);
+
+    const trace = result.attachments.find((a) => a.name === "trace" && a.path);
+    if (this.tracePrefix !== undefined && trace?.path) {
+      const traces = this.pendingTraces.get(test.id) ?? [];
+      traces.push({
+        path: trace.path,
+        retry: result.retry,
+        status: result.status,
+        repeatEachIndex: test.repeatEachIndex,
+      });
+      this.pendingTraces.set(test.id, traces);
+    }
 
     if (isFinalAttempt(test, result)) {
       this.uploadScreenshots(test.id);
@@ -313,19 +379,27 @@ class UrnerysReporter implements Reporter {
       return;
     }
 
+    const target = { host: this.host, project: this.options.project, build: session.build };
+    const name = report.name ?? "playwright-report";
+
     try {
       const artifact = await uploadArtifact({
-        host: this.host,
-        project: this.options.project,
-        build: session.build,
+        ...target,
         token: await session.token(),
-        name: report.name ?? "playwright-report",
+        name,
         kind: "playwright-report",
         directory: folder,
       });
       console.log(`[urnerys] Uploaded the Playwright report: ${artifact.url}`);
     } catch (e) {
       console.warn("[urnerys] Failed to upload the Playwright report:", (e as Error).message);
+      return;
+    }
+
+    try {
+      await linkArtifactImages({ ...target, token: await session.token(), name, images: this.imageNames });
+    } catch (e) {
+      console.warn("[urnerys] Failed to link the Playwright report to the images:", (e as Error).message);
     }
   }
 
@@ -351,8 +425,9 @@ class UrnerysReporter implements Reporter {
   }
 
   /*
-   * Uploads the screenshots from the last attempt of a test. A screenshot that was already uploaded, e.g. by another
-   * test with the same collection, title, and formula, is skipped.
+   * Uploads the screenshots from the last attempt of a test, then the traces of all its attempts, linked to the images
+   * of those screenshots. A screenshot that was already uploaded, e.g. by another test with the same collection, title,
+   * and formula, is skipped, and the traces aren't linked to it.
    */
   private uploadScreenshots(testId: string): void {
     const screenshots = this.pendingScreenshots.get(testId);
@@ -360,7 +435,12 @@ class UrnerysReporter implements Reporter {
       return;
     }
 
+    const traces = this.pendingTraces.get(testId) ?? [];
+
     this.pendingScreenshots.delete(testId);
+    this.pendingTraces.delete(testId);
+
+    const images: Promise<string | undefined>[] = [];
 
     for (const [key, screenshot] of screenshots) {
       if (this.uploadedScreenshots.has(key)) {
@@ -371,7 +451,55 @@ class UrnerysReporter implements Reporter {
 
       this.uploadedScreenshots.add(key);
       this.addRealization(screenshot);
-      this.uploads.push(this.session.then((session) => session && this.uploadScreenshot(session, screenshot)));
+      images.push(this.session.then((session) => session && this.uploadScreenshot(session, screenshot)));
+    }
+
+    this.uploads.push(
+      Promise.all(images).then(async (names) => {
+        const uploaded = names.filter((name) => name !== undefined);
+        this.imageNames.push(...uploaded);
+
+        const session = await this.session;
+        if (!session || uploaded.length === 0) {
+          return;
+        }
+
+        await Promise.all(traces.map((trace) => this.uploadTrace(session, testId, trace, uploaded)));
+      }),
+    );
+  }
+
+  private async uploadTrace(session: Session, testId: string, trace: Trace, images: string[]): Promise<void> {
+    if (this.tracePrefix === undefined) {
+      return;
+    }
+
+    const target = {
+      host: this.host,
+      project: this.options.project,
+      build: session.build,
+      name: `${this.tracePrefix}${traceKey(testId, trace)}`,
+    };
+
+    try {
+      await uploadArtifactFile({
+        ...target,
+        token: await session.token(),
+        kind: "playwright-trace",
+        file: trace.path,
+        attributes: { "dev.urnerys.test.retry": trace.retry, "dev.urnerys.test.status": trace.status },
+      });
+      await linkArtifactImages({ ...target, token: await session.token(), images });
+    } catch (e) {
+      if (!(e instanceof ArtifactsNotEnabledError)) {
+        console.warn(`[urnerys] Failed to upload the trace ${trace.path}:`, (e as Error).message);
+        return;
+      }
+
+      if (this.tracePrefix !== undefined) {
+        this.tracePrefix = undefined;
+        console.warn(`[urnerys] Skipping trace uploads — ${e.message}`);
+      }
     }
   }
 
@@ -413,7 +541,13 @@ class UrnerysReporter implements Reporter {
     return exchangeToken(this.host, oidcToken);
   }
 
-  private async uploadScreenshot(session: Session, { collection, snapshot, formula, body }: Screenshot): Promise<void> {
+  /*
+   * Returns the name of the image, or `undefined` if the upload failed.
+   */
+  private async uploadScreenshot(
+    session: Session,
+    { collection, snapshot, formula, body }: Screenshot,
+  ): Promise<string | undefined> {
     const formData = new FormData();
     formData.set("collection", collection);
     formData.set("snapshot", snapshot);
@@ -431,9 +565,14 @@ class UrnerysReporter implements Reporter {
       );
       if (!response.ok) {
         console.warn(`[urnerys] Upload failed for ${snapshot}/${formula}: ${response.status}`);
+        return undefined;
       }
+
+      const { image } = (await response.json()) as { image: { name: string } };
+      return image.name;
     } catch (e) {
       console.warn(`[urnerys] Upload error for ${snapshot}/${formula}:`, (e as Error).message);
+      return undefined;
     }
   }
 
