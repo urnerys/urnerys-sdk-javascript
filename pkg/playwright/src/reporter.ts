@@ -1,10 +1,14 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
 import os from "node:os";
+import path from "node:path";
 
 import type { FullConfig, FullResult, Reporter, TestCase, TestResult } from "@playwright/test/reporter";
 
+import { uploadArtifact } from "./artifact.js";
 import { fetchGithubOidcToken, githubBuildId, githubCommit } from "./github.js";
 import { METADATA_CONTENT_TYPE, type RealizationAttributes, type ScreenshotMetadata } from "./protocol.js";
+import { htmlReportFolder } from "./report.js";
 
 export interface UrnerysReporterOptions {
   /**
@@ -27,12 +31,45 @@ export interface UrnerysReporterOptions {
    * Baseline to check against or promote to. Defaults to `production`.
    */
   baseline?: string;
+
+  /**
+   * Whether to upload the report of the Playwright HTML reporter to the build once the run is done. Defaults to `true`.
+   * The upload is skipped with a warning if the HTML reporter is not configured.
+   */
+  report?: boolean;
+
+  /**
+   * Name of the report within the build. Defaults to `playwright-report`. Runs that upload to the same build need
+   * different names, since a report replaces an earlier one with the same name.
+   */
+  name?: string;
+}
+
+/*
+ * Passed by Playwright to every reporter, but not documented.
+ */
+interface PlaywrightReporterOptions {
+  configDir?: string;
 }
 
 interface Session {
-  token: string;
   build: string;
+
+  /**
+   * Returns a token that is valid for at least a few more minutes.
+   */
+  token(): Promise<string>;
 }
+
+interface AccessToken {
+  value: string;
+  expiresAt: number;
+}
+
+/*
+ * Long enough for a request that starts with a token close to expiry to reach the server in time.
+ */
+const TOKEN_REFRESH_MARGIN_MS = 5 * 60 * 1000;
 
 interface Screenshot extends ScreenshotMetadata {
   body: Buffer;
@@ -60,7 +97,35 @@ function osType(): string {
   return platform === "win32" ? "windows" : platform;
 }
 
-async function exchangeToken(host: string, subjectToken: string): Promise<string> {
+/*
+ * Returns the cached token until it gets close to expiry, then fetches a new one. A failed refresh keeps the old token,
+ * so the next call tries again.
+ */
+function refreshingToken(initial: AccessToken, refresh: () => Promise<AccessToken>): () => Promise<string> {
+  let current = Promise.resolve(initial);
+
+  return async () => {
+    const pending = current;
+    const token = await pending;
+    if (Date.now() < token.expiresAt - TOKEN_REFRESH_MARGIN_MS) {
+      return token.value;
+    }
+
+    /*
+     * Concurrent callers that saw the same expiring token share one refresh.
+     */
+    if (current === pending) {
+      current = refresh().catch((e: unknown) => {
+        current = pending;
+        throw e;
+      });
+    }
+
+    return (await current).value;
+  };
+}
+
+async function exchangeToken(host: string, subjectToken: string): Promise<AccessToken> {
   const formData = new FormData();
   formData.set("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange");
   formData.set("subject_token", subjectToken);
@@ -75,8 +140,11 @@ async function exchangeToken(host: string, subjectToken: string): Promise<string
     throw new Error(`Token exchange failed: ${response.status}`);
   }
 
-  const { access_token } = (await response.json()) as { access_token: string };
-  return access_token;
+  const { access_token, expires_in } = (await response.json()) as { access_token: string; expires_in?: number };
+  return {
+    value: access_token,
+    expiresAt: expires_in === undefined ? Number.POSITIVE_INFINITY : Date.now() + expires_in * 1000,
+  };
 }
 
 async function createBuild(host: string, project: string, token: string, build: string): Promise<void> {
@@ -118,13 +186,21 @@ class UrnerysReporter implements Reporter {
 
   private uploads: Promise<void>[] = [];
 
-  constructor(private options: UrnerysReporterOptions) {
+  /*
+   * `undefined` if the HTML reporter is not configured.
+   */
+  private reportFolder: string | undefined;
+
+  constructor(private options: UrnerysReporterOptions & PlaywrightReporterOptions) {
     this.host = options.host ?? process.env.URNERYS_HOST ?? "app.urnerys.dev";
     this.baseline = options.baseline ?? "production";
   }
 
   onBegin(config: FullConfig): void {
     this.version = config.version;
+
+    const configDir = this.options.configDir ?? (config.configFile ? path.dirname(config.configFile) : process.cwd());
+    this.reportFolder = htmlReportFolder(config, configDir);
 
     this.session = this.setup().catch((e: Error) => {
       console.warn("[urnerys] Skipping uploads — setup failed:", e.message);
@@ -185,7 +261,7 @@ class UrnerysReporter implements Reporter {
           method: "PATCH",
           headers: {
             "Content-Type": "application/json",
-            Authorization: `Bearer ${session.token}`,
+            Authorization: `Bearer ${await session.token()}`,
           },
           body: JSON.stringify({ baseline: { build: session.build } }),
         });
@@ -197,7 +273,7 @@ class UrnerysReporter implements Reporter {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Authorization: `Bearer ${session.token}`,
+            Authorization: `Bearer ${await session.token()}`,
           },
           body: JSON.stringify({ check: { baseline: this.baseline } }),
         });
@@ -207,6 +283,46 @@ class UrnerysReporter implements Reporter {
       }
     } catch (e) {
       console.warn(`[urnerys] Failed to finalize build ${session.build}:`, (e as Error).message);
+    }
+  }
+
+  /*
+   * The HTML reporter writes its files in `onEnd`, and `onExit` runs once every reporter's `onEnd` has finished.
+   */
+  async onExit(): Promise<void> {
+    if (this.options.report === false) {
+      return;
+    }
+
+    const session = await this.session;
+    if (!session) {
+      return;
+    }
+
+    const folder = this.reportFolder;
+    if (!folder) {
+      console.warn("[urnerys] Skipping the report upload — the Playwright HTML reporter is not configured");
+      return;
+    }
+
+    if (!fs.existsSync(path.join(folder, "index.html"))) {
+      console.warn(`[urnerys] Skipping the report upload — ${folder} has no index.html`);
+      return;
+    }
+
+    try {
+      const artifact = await uploadArtifact({
+        host: this.host,
+        project: this.options.project,
+        build: session.build,
+        token: await session.token(),
+        name: this.options.name ?? "playwright-report",
+        kind: "playwright-report",
+        directory: folder,
+      });
+      console.log(`[urnerys] Uploaded the Playwright report: ${artifact.url}`);
+    } catch (e) {
+      console.warn("[urnerys] Failed to upload the Playwright report:", (e as Error).message);
     }
   }
 
@@ -260,19 +376,32 @@ class UrnerysReporter implements Reporter {
    * A build id from `URNERYS_BUILD_ID` means the build was created elsewhere, so it is not created again.
    */
   private async setup(): Promise<Session> {
-    const token = process.env.URNERYS_TOKEN ?? (await this.exchangeGithubToken());
+    const token = await this.initialToken();
 
     const existingBuild = process.env.URNERYS_BUILD_ID;
     const build = existingBuild ?? githubBuildId() ?? randomUUID().replaceAll("-", "").substring(0, 13);
 
     if (!existingBuild) {
-      await createBuild(this.host, this.options.project, token, build);
+      await createBuild(this.host, this.options.project, await token(), build);
     }
 
     return { token, build };
   }
 
-  private async exchangeGithubToken(): Promise<string> {
+  /*
+   * A token from `URNERYS_TOKEN` is used as is. A token exchanged for a GitHub OIDC token expires, possibly before a
+   * long run is done, so it is exchanged again when needed.
+   */
+  private async initialToken(): Promise<() => Promise<string>> {
+    const fromEnv = process.env.URNERYS_TOKEN;
+    if (fromEnv) {
+      return async () => fromEnv;
+    }
+
+    return refreshingToken(await this.exchangeGithubToken(), () => this.exchangeGithubToken());
+  }
+
+  private async exchangeGithubToken(): Promise<AccessToken> {
     const oidcToken = await fetchGithubOidcToken(`https://${this.host}`);
     if (!oidcToken) {
       throw new Error("URNERYS_TOKEN is not set and no GitHub OIDC token is available");
@@ -293,7 +422,7 @@ class UrnerysReporter implements Reporter {
         `https://${this.host}/api/v1/projects/${this.options.project}/builds/${session.build}/images`,
         {
           method: "POST",
-          headers: { Authorization: `Bearer ${session.token}` },
+          headers: { Authorization: `Bearer ${await session.token()}` },
           body: formData,
         },
       );
@@ -313,7 +442,7 @@ class UrnerysReporter implements Reporter {
           method: "PUT",
           headers: {
             "Content-Type": "application/json",
-            Authorization: `Bearer ${session.token}`,
+            Authorization: `Bearer ${await session.token()}`,
           },
           body: JSON.stringify({ realization: { attributes } }),
         },
