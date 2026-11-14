@@ -1,5 +1,15 @@
 # @urnerys/playwright
 
+## 0.4.0
+
+### Minor Changes
+
+- **Upload traces and link them and the report to images** ([#17](https://github.com/urnerys/urnerys-sdk-javascript/pull/17)) -
+
+### Patch Changes
+
+- **Send `Content-Length` when uploading the report** ([#15](https://github.com/urnerys/urnerys-sdk-javascript/pull/15)) - The server can now reject an oversized upload right away, and reverse proxies no longer receive a body of unknown length.
+
 ## 0.3.0
 
 ### Minor Changes
