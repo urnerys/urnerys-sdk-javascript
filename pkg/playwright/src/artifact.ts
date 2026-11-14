@@ -74,6 +74,7 @@ export async function uploadArtifact(options: UploadArtifactOptions): Promise<Ar
     method: "PUT",
     headers: {
       "Content-Type": "application/zip",
+      "Content-Length": String(zip.size),
       Authorization: `Bearer ${token}`,
     },
     body: Readable.toWeb(Readable.from(zip.stream())) as ReadableStream<Uint8Array>,
